@@ -27,13 +27,25 @@ The site goes live at the address above within a minute or two, and redeploys on
 
 ## Where data is saved
 
-The GitHub Pages site saves to **each browser on its own device** (localStorage). Tabs on the same device
-stay in sync, but other players don't see your tasks or messages. The first visit shows example data;
-use **Start fresh** to clear it.
+- **With Firebase set up** (`firebase-config.js` filled in): every player shares the same trophies,
+  diamonds, tasks and chats, live. Visitors are signed in anonymously, so nobody needs an account or email.
+- **Without Firebase** (`window.FIREBASE_CONFIG = null`): each browser saves its own data (localStorage),
+  so other players don't see your changes. The first visit shows example data; use **Start fresh** to clear it.
 
-To share trophies, tasks and chat between players' phones without accounts or emails, the site needs a
-database service (for example Firebase with anonymous sign-in). `app.js` keeps all saving in one store
-object, so a shared store only needs `addActivity`, `removeActivity`, `setPlayer`, `setTown` and `addMessage`.
+## Setting up Firebase (free, one time)
+
+1. Go to https://console.firebase.google.com and click **Create a project**. Give it a name; you can turn Google Analytics off.
+2. **Build → Authentication → Get started → Sign-in method → Anonymous → Enable → Save.**
+3. **Build → Firestore Database → Create database.** Pick a location near your players and start in **production mode**.
+4. In Firestore, open the **Rules** tab, replace everything with the contents of [`firestore.rules`](firestore.rules), and click **Publish**.
+5. Click the **gear icon → Project settings → General**. Under **Your apps**, click the **web icon `</>`**, give it a nickname and click **Register app**.
+6. Copy the `firebaseConfig` values into [`firebase-config.js`](firebase-config.js) (replace `null` with the object) and commit to `main`.
+   These values aren't secret; the rules decide what visitors may do.
+
+GitHub Pages redeploys in a minute or two, and the header changes to **Live · shared with your township**.
+
+The free plan allows 50,000 reads and 20,000 writes a day. The app keeps running totals and loads only the latest
+40 tasks and 150 chat messages, so a 20-player township stays well inside it.
 
 ## Running it locally
 

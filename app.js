@@ -6,8 +6,11 @@
  * Storage:
  *  - Opened as a claude.ai artifact with the `db` capability, everything is
  *    shared live between every player who opens the link.
- *  - Opened anywhere else (GitHub Pages, a local file) it saves to this
- *    browser's localStorage and syncs between tabs on the same device.
+ *  - On GitHub Pages with a Firebase project set in firebase-config.js,
+ *    everything is shared live through Firestore. Players are signed in
+ *    anonymously, so nobody needs an account or an email address.
+ *  - Otherwise it saves to this browser's localStorage and syncs between
+ *    tabs on the same device.
  */
 (function () {
   'use strict';
@@ -61,7 +64,8 @@
   var DEFAULT_TOWN = { name: 'Our Township', rate: 1 };
 
   // ---------------------------------------------------------------- state
-  var S = { town: Object.assign({}, DEFAULT_TOWN), players: {}, activity: [], messages: [] };
+  var S = { town: Object.assign({}, DEFAULT_TOWN), players: {}, activity: [], messages: [], agg: null };
+  // S.agg (Firebase mode only): { players: {pid: {trophies, tasks, byType, last}}, days: {dayKey: {t, ts, pt: {pid: trophies}}} }
   var mode = 'local';           // local | connecting | live
   var connectSlow = false;
   var isDemo = false;
@@ -184,16 +188,31 @@
     var by = {};
     PIDS.forEach(function (id) { by[id] = { id: id, trophies: 0, tasks: 0, byType: {}, last: 0, week: 0 }; });
     var weekAgo = Date.now() - 7 * 86400000;
-    S.activity.forEach(function (a) {
-      var s = by[a.pid]; if (!s) return;
-      s.trophies += num(a.trophies);
-      s.tasks += num(a.count);
-      if (a.type !== 'adjust') {
-        s.byType[a.type] = (s.byType[a.type] || 0) + num(a.count);
-        if (num(a.ts) > s.last) s.last = num(a.ts);
-        if (num(a.ts) >= weekAgo) s.week += num(a.trophies);
-      }
-    });
+    if (S.agg) {
+      var now = new Date(), weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6).getTime();
+      PIDS.forEach(function (id) {
+        var g = S.agg.players[id] || {}, s = by[id];
+        s.trophies = num(g.trophies); s.tasks = num(g.tasks); s.last = num(g.last);
+        var bt = g.byType || {};
+        Object.keys(bt).forEach(function (k) { if (num(bt[k]) > 0) s.byType[k] = num(bt[k]); });
+      });
+      Object.keys(S.agg.days).forEach(function (k) {
+        var d = S.agg.days[k];
+        if (num(d.ts) < weekStart || !d.pt) return;
+        Object.keys(d.pt).forEach(function (pid) { if (by[pid]) by[pid].week += num(d.pt[pid]); });
+      });
+    } else {
+      S.activity.forEach(function (a) {
+        var s = by[a.pid]; if (!s) return;
+        s.trophies += num(a.trophies);
+        s.tasks += num(a.count);
+        if (a.type !== 'adjust') {
+          s.byType[a.type] = (s.byType[a.type] || 0) + num(a.count);
+          if (num(a.ts) > s.last) s.last = num(a.ts);
+          if (num(a.ts) >= weekAgo) s.week += num(a.trophies);
+        }
+      });
+    }
     var list = PIDS.map(function (id) {
       var s = by[id];
       s.trophies = Math.max(0, s.trophies);
@@ -402,6 +421,142 @@
       setPlayer: function (id, data) { return attempt(function () { return db.collection('players').doc(id).set(clean(data)); }); },
       setTown: function (t) { return attempt(function () { return db.doc('settings/town').set(clean(t)); }); },
       addMessage: function (m) { return attempt(function () { return db.collection('messages').doc(m.id).set(clean(m)); }); }
+    };
+  }
+
+  // Firebase (Firestore) store for the GitHub Pages site. Keeps running totals
+  // per player and per day (atomic increments), plus the latest task log and
+  // chat messages, so each visit reads a few hundred documents at most.
+  var FIREBASE_SDK = '10.12.2';
+  var ACTIVITY_WINDOW = 40, MESSAGE_WINDOW = 150;
+
+  function loadScript(src) {
+    return new Promise(function (resolve, reject) {
+      var el = document.createElement('script');
+      el.src = src; el.onload = resolve; el.onerror = function () { reject(new Error('Could not load ' + src)); };
+      document.head.appendChild(el);
+    });
+  }
+
+  function makeFirebaseStore(cfg) {
+    var fs = null, FV = null, timer = null;
+    var loaded = { players: false, days: false, activity: false, messages: false, town: false };
+    function padKey(ts) { var d = new Date(ts); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
+    function dayStart(ts) { var d = new Date(ts); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
+    function arrived(key) {
+      loaded[key] = true;
+      if (loaded.players && loaded.days && loaded.activity && loaded.messages && loaded.town && mode !== 'live') {
+        mode = 'live'; connectSlow = false; clearTimeout(timer);
+      }
+      changed();
+    }
+    function listenErr(e) {
+      if (window.console) console.error(e);
+      clearTimeout(timer);
+      if (mode === 'connecting') mode = 'live';
+      connectSlow = false;
+      toast(e && e.code === 'permission-denied'
+        ? 'The shared database refused access. Check the Firestore rules and that Anonymous sign-in is turned on.'
+        : 'Live updates stopped. Reload the page to reconnect.');
+      changed();
+    }
+    function writeErr(e) {
+      if (window.console) console.error(e);
+      if (e && e.code === 'permission-denied') toast('The database rules blocked that change.');
+      else if (e && e.code === 'resource-exhausted') toast('Today\'s free database limit is used up. Changes will save again tomorrow.');
+      else toast('That change didn\'t save. Check your connection and try again.');
+      throw e;
+    }
+    function clean(o) { var c = {}; Object.keys(o).forEach(function (k) { if (k !== 'id' && o[k] !== undefined) c[k] = o[k]; }); return c; }
+    function applyTotals(batch, a, sign) {
+      var t = sign * num(a.trophies), c = sign * num(a.count);
+      var p = { trophies: FV.increment(t), tasks: FV.increment(c) };
+      if (a.type !== 'adjust') {
+        p.byType = {}; p.byType[a.type] = FV.increment(c);
+        if (sign > 0) p.last = num(a.ts);
+        var d = { t: FV.increment(t), ts: dayStart(num(a.ts)), pt: {} };
+        d.pt[a.pid] = FV.increment(t);
+        batch.set(fs.collection('days').doc(padKey(num(a.ts))), d, { merge: true });
+      }
+      batch.set(fs.collection('players').doc(a.pid), p, { merge: true });
+    }
+    function listen() {
+      fs.collection('players').onSnapshot(function (snap) {
+        var names = {}, totals = {};
+        snap.forEach(function (d) {
+          if (PIDS.indexOf(d.id) < 0) return;
+          var x = d.data();
+          names[d.id] = { name: x.name, color: x.color };
+          totals[d.id] = x;
+        });
+        S.players = names; S.agg.players = totals; arrived('players');
+      }, listenErr);
+      fs.collection('days').where('ts', '>=', dayStart(Date.now() - 31 * 86400000)).onSnapshot(function (snap) {
+        var days = {};
+        snap.forEach(function (d) { var x = d.data(); days[dayKey(num(x.ts))] = x; });
+        S.agg.days = days; arrived('days');
+      }, listenErr);
+      fs.collection('activity').orderBy('ts', 'desc').limit(ACTIVITY_WINDOW).onSnapshot(function (snap) {
+        var list = []; snap.forEach(function (d) { list.push(Object.assign({ id: d.id }, d.data())); });
+        S.activity = list; arrived('activity');
+      }, listenErr);
+      fs.collection('messages').orderBy('ts', 'desc').limit(MESSAGE_WINDOW).onSnapshot(function (snap) {
+        var list = []; snap.forEach(function (d) { list.push(Object.assign({ id: d.id }, d.data())); });
+        S.messages = list.reverse(); arrived('messages');
+      }, listenErr);
+      fs.collection('settings').doc('town').onSnapshot(function (d) {
+        S.town = Object.assign({}, DEFAULT_TOWN, d.exists ? d.data() : {});
+        arrived('town');
+      }, listenErr);
+    }
+    return {
+      kind: 'firebase',
+      init: function () {
+        S.agg = { players: {}, days: {} };
+        S.activity = []; S.messages = []; S.players = {};
+        timer = setTimeout(function () { if (mode === 'connecting') { connectSlow = true; changed(); } }, 10000);
+        var base = 'https://www.gstatic.com/firebasejs/' + FIREBASE_SDK + '/';
+        loadScript(base + 'firebase-app-compat.js')
+          .then(function () { return Promise.all([loadScript(base + 'firebase-auth-compat.js'), loadScript(base + 'firebase-firestore-compat.js')]); })
+          .then(function () {
+            var app = firebase.initializeApp(cfg);
+            fs = app.firestore(); FV = firebase.firestore.FieldValue;
+            try { fs.enablePersistence({ synchronizeTabs: true }).catch(function () { /* cache unavailable: still works online */ }); } catch (e) { /* ignore */ }
+            return app.auth().signInAnonymously();
+          })
+          .then(listen)
+          .catch(function (e) {
+            if (window.console) console.error(e);
+            clearTimeout(timer);
+            toast(e && e.code === 'auth/operation-not-allowed'
+              ? 'Turn on Anonymous sign-in in Firebase to share data. Saving on this device for now.'
+              : 'Couldn\'t reach the shared database. Saving on this device for now.');
+            S.agg = null; mode = 'local'; store = localStore; localStore.init();
+          });
+      },
+      addActivity: function (a) {
+        var b = fs.batch();
+        b.set(fs.collection('activity').doc(a.id), clean(a));
+        applyTotals(b, a, 1);
+        return b.commit().catch(writeErr);
+      },
+      removeActivity: function (id) {
+        var a = S.activity.filter(function (x) { return x.id === id; })[0];
+        if (!a) return Promise.resolve();
+        var b = fs.batch();
+        b.delete(fs.collection('activity').doc(id));
+        applyTotals(b, a, -1);
+        return b.commit().catch(writeErr);
+      },
+      setPlayer: function (id, data) {
+        return fs.collection('players').doc(id).set({ name: data.name, color: data.color }, { merge: true }).catch(writeErr);
+      },
+      setTown: function (t) {
+        return fs.collection('settings').doc('town').set({ name: t.name, rate: num(t.rate) || 1 }, { merge: true }).catch(writeErr);
+      },
+      addMessage: function (m) {
+        return fs.collection('messages').doc(m.id).set(clean(m)).catch(writeErr);
+      }
     };
   }
 
@@ -631,7 +786,7 @@
   }
 
   // bar chart of a per-day series (single series: no legend; title names it)
-  function dayBars(cls, valueOf, unit) {
+  function dayBars(cls, mult, unit) {
     var days = ui.range, now = new Date();
     var start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (days - 1)).getTime();
     var bins = [];
@@ -640,11 +795,18 @@
       bins.push({ ts: ts, key: dayKey(ts), v: 0 });
     }
     var idx = {}; bins.forEach(function (b, i) { idx[b.key] = i; });
-    S.activity.forEach(function (a) {
-      if (a.type === 'adjust' || num(a.ts) < start) return;
-      var i = idx[dayKey(num(a.ts))];
-      if (i != null) bins[i].v += valueOf(a);
-    });
+    if (S.agg) {
+      Object.keys(S.agg.days).forEach(function (k) {
+        var i = idx[k];
+        if (i != null) bins[i].v += num(S.agg.days[k].t) * mult;
+      });
+    } else {
+      S.activity.forEach(function (a) {
+        if (a.type === 'adjust' || num(a.ts) < start) return;
+        var i = idx[dayKey(num(a.ts))];
+        if (i != null) bins[i].v += num(a.trophies) * mult;
+      });
+    }
     var max = Math.max.apply(null, bins.map(function (b) { return b.v; }));
     var step = niceStep(max);
     var top = Math.max(step * 4, step);
@@ -702,7 +864,7 @@
       (tier.next ? '<div style="margin-top:14px;display:grid;gap:6px"><div class="muted" style="font-weight:700;font-size:.88rem">' + fmt(t.trophies - tier.cur.min) + ' of ' + fmt(tier.next.min - tier.cur.min) + ' trophies toward ' + esc(tier.next.name) + '</div>' +
         '<div class="progress"><span style="width:' + (tier.pct * 100).toFixed(1) + '%"></span></div></div>' : '') + '</section>' +
       '<div class="grid grid-2">' +
-      '<section class="panel"><h3>Trophies per day ' + rangeSeg() + '</h3>' + dayBars('', function (a) { return num(a.trophies); }, 'trophies') + '</section>' +
+      '<section class="panel"><h3>Trophies per day ' + rangeSeg() + '</h3>' + dayBars('', 1, 'trophies') + '</section>' +
       '<section class="panel"><h3>Top earners this week</h3>' + (weekly.length ? '<ul class="list">' + weekly.slice(0, 8).map(function (s, i) {
         return '<li><button class="row" data-act="open-player" data-id="' + s.id + '"><span class="rank">' + (i + 1) + '</span>' + avatar(s.p) +
           '<span class="row-name">' + esc(s.p.name) + '</span><span class="row-val c-gold">' + icon('trophy', 'sm') + fmt(s.week) + '</span></button></li>';
@@ -731,7 +893,7 @@
           '<span class="hbar-track"><span class="hbar-fill" style="display:block;width:' + (s.diamonds / max * 100).toFixed(1) + '%"></span></span>' +
           '<span class="hbar-val c-diamond">' + fmt(s.diamonds) + '</span></button>';
       }).join('') + '</div></section>' +
-      '<section class="panel"><h3>Diamonds per day ' + rangeSeg() + '</h3>' + dayBars('diamond', function (a) { return num(a.trophies) * rate(); }, 'diamonds') +
+      '<section class="panel"><h3>Diamonds per day ' + rangeSeg() + '</h3>' + dayBars('diamond', rate(), 'diamonds') +
       '<h3 style="margin-top:18px">Latest diamond earnings</h3>' + feedItems(sortedActivity().filter(function (a) { return a.type !== 'adjust'; }).slice(0, 6), { diamonds: true }) + '</section>' +
       '</div>';
   }
@@ -785,7 +947,7 @@
     if (!ui.logPlayer) ui.logPlayer = me || PIDS[0];
     var typeTotals = {};
     TASK_TYPES.forEach(function (t) { typeTotals[t.id] = 0; });
-    S.activity.forEach(function (a) { if (a.type !== 'adjust' && typeTotals[a.type] != null) typeTotals[a.type] += num(a.count); });
+    st.list.forEach(function (s) { Object.keys(s.byType).forEach(function (k) { if (typeTotals[k] != null) typeTotals[k] += num(s.byType[k]); }); });
     var typeMax = Math.max(1, Math.max.apply(null, TASK_TYPES.map(function (t) { return typeTotals[t.id]; })));
     var byTasks = st.list.slice().sort(function (a, b) { return b.tasks - a.tasks || a.p.n - b.p.n; });
     var taskMax = Math.max(1, byTasks[0] ? byTasks[0].tasks : 1);
@@ -912,7 +1074,7 @@
         '<form class="form" data-form="town"><div class="field"><label for="town-name">Township name</label><input class="input" id="town-name" maxlength="40" value="' + esc(S.town.name) + '"' + (canWrite() ? '' : ' disabled') + '></div>' +
         '<div class="toolbar" style="justify-content:flex-end"><button class="btn primary" type="submit"' + (canWrite() ? '' : ' disabled') + '>Save name</button></div></form>' +
         '<div class="muted" style="font-size:.88rem">' + (mode === 'live' ? 'This township is shared: everyone with the link sees the same trophies, diamonds, tasks and chats, live.'
-          : mode === 'local' ? 'This copy saves to this browser only. Open the shared link to play together with your township across devices.' : 'Connecting…') + '</div>' +
+          : mode === 'local' ? 'This copy saves to this browser only, so other players don\'t see your changes.' : 'Connecting…') + '</div>' +
         (mode === 'local' ? '<div class="panel" style="display:grid;gap:10px"><b>Data on this device</b>' +
           '<div class="toolbar"><button class="btn danger" data-act="reset-blank">Start fresh (clear everything)</button><button class="btn" data-act="load-demo">Load example data</button></div></div>' : '');
     } else if (m.kind === 'confirm-reset') {
@@ -1153,6 +1315,11 @@
         settled = true; store = makeDbStore(db); store.init();
       }).catch(fallback);
       setTimeout(fallback, 12000);
+    } else if (window.FIREBASE_CONFIG && window.FIREBASE_CONFIG.projectId) {
+      mode = 'connecting';
+      store = makeFirebaseStore(window.FIREBASE_CONFIG);
+      renderAll();
+      store.init();
     } else {
       store = localStore; localStore.init();
     }

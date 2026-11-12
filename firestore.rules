@@ -1,0 +1,64 @@
+rules_version = '2';
+
+// Security rules for the Township Reward System.
+// Paste into Firebase console → Firestore Database → Rules, then Publish.
+// Visitors are signed in anonymously by the app (no account or email needed);
+// these rules only let signed-in visitors read and write data in the app's own shapes.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function data() { return request.resource.data; }
+    function isPlayerSlot(id) { return id.matches('p(0[1-9]|1[0-9]|20)'); }
+
+    match /players/{pid} {
+      allow read: if signedIn();
+      allow write: if signedIn() && isPlayerSlot(pid)
+        && data().keys().hasOnly(['name', 'color', 'trophies', 'tasks', 'byType', 'last'])
+        && (!('name' in data()) || (data().name is string && data().name.size() <= 32))
+        && (!('color' in data()) || (data().color is string && data().color.size() <= 7))
+        && (!('trophies' in data()) || data().trophies is number)
+        && (!('tasks' in data()) || data().tasks is number)
+        && (!('byType' in data()) || data().byType is map)
+        && (!('last' in data()) || data().last is number);
+    }
+
+    match /days/{day} {
+      allow read: if signedIn();
+      allow write: if signedIn() && day.size() == 10
+        && data().keys().hasOnly(['t', 'ts', 'pt'])
+        && data().t is number && data().ts is number && data().pt is map;
+    }
+
+    match /activity/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn() && id.size() <= 40
+        && data().keys().hasOnly(['pid', 'type', 'trophies', 'count', 'ts', 'by'])
+        && isPlayerSlot(data().pid)
+        && data().type is string && data().type.size() <= 20
+        && data().trophies is int && data().trophies >= -100000 && data().trophies <= 100000
+        && data().count is int && data().count >= -10000 && data().count <= 10000
+        && data().ts is number;
+      allow delete: if signedIn();
+      allow update: if false;
+    }
+
+    match /messages/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn() && id.size() <= 40
+        && data().keys().hasOnly(['ch', 'from', 'text', 'ts'])
+        && data().ch is string && data().ch.size() <= 20
+        && data().from is string && data().from.size() <= 10
+        && data().text is string && data().text.size() > 0 && data().text.size() <= 500
+        && data().ts is number;
+      allow update, delete: if false;
+    }
+
+    match /settings/town {
+      allow read: if signedIn();
+      allow write: if signedIn()
+        && data().keys().hasOnly(['name', 'rate'])
+        && (!('name' in data()) || (data().name is string && data().name.size() <= 40))
+        && (!('rate' in data()) || data().rate in [1, 2, 5, 10]);
+    }
+  }
+}
