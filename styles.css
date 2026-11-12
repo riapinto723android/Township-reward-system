@@ -417,6 +417,7 @@ table.data tbody tr { cursor: pointer; }
   box-shadow: var(--shadow); display: flex; gap: 10px; align-items: center; animation: pop .2s ease;
 }
 .toast.gold { background: var(--gold-soft); color: var(--ink); border: 1px solid var(--gold); }
+.toast.msg { background: var(--accent); color: var(--accent-ink); }
 
 #confetti { position: fixed; inset: 0; pointer-events: none; z-index: 70; width: 100%; height: 100%; }
 

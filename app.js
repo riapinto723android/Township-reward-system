@@ -61,6 +61,7 @@
   var LS_KEY = 'trs-state-v1';
   var ME_KEY = 'trs-me';
   var READ_KEY = 'trs-read';
+  var ALERT_KEY = 'trs-alerts';
   var DEFAULT_TOWN = { name: 'Our Township', rate: 1 };
 
   // ---------------------------------------------------------------- state
@@ -75,6 +76,9 @@
   if (me && PIDS.indexOf(me) < 0) me = null;
   var lastRead = {};
   try { lastRead = JSON.parse(lsGet(READ_KEY) || '{}') || {}; } catch (e) { lastRead = {}; }
+  var alerts = { sound: true, popup: false };
+  try { Object.assign(alerts, JSON.parse(lsGet(ALERT_KEY) || '{}') || {}); } catch (e) { /* defaults */ }
+  function saveAlerts() { lsSet(ALERT_KEY, JSON.stringify(alerts)); }
 
   var ui = {
     view: 'town',
@@ -152,7 +156,9 @@
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
     up: '<path d="m6 15 6-6 6 6"/>',
     down: '<path d="m6 9 6 6 6-6"/>',
-    swap: '<path d="M7 4 3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>'
+    swap: '<path d="M7 4 3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>',
+    bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
+    bellOff: '<path d="M6 16V11a6 6 0 0 1 9.5-4.9M18 11v5l1.5 2H8"/><path d="M10 20.5a2 2 0 0 0 4 0M3 3l18 18"/>'
   };
   function icon(name, cls) {
     return '<svg class="ico ' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + ICONS[name] + '</svg>';
@@ -597,7 +603,9 @@
   function scheduleRender() {
     if (renderQueued) return;
     renderQueued = true;
-    requestAnimationFrame(function () { renderQueued = false; renderAll(); });
+    var run = function () { renderQueued = false; renderAll(); };
+    if (document.visibilityState === 'hidden') setTimeout(run, 0);
+    else requestAnimationFrame(run);
   }
 
   function swap(el, html) {
@@ -651,7 +659,9 @@
     swap(document.getElementById('modal-root'), renderModal());
     var f = document.getElementById('footer');
     if (f && !f.innerHTML) f.innerHTML = 'A fan-made co-op tracker for township games. Not affiliated with any game publisher.';
-    document.title = S.town.name ? S.town.name + ' · Township Rewards' : 'Township Rewards';
+    var u = totalUnread();
+    document.title = (u ? '(' + (u > 99 ? '99+' : u) + ') ' : '') + (S.town.name ? S.town.name + ' · Township Rewards' : 'Township Rewards');
+    checkNewMessages();
   }
 
   // ---------------------------------------------------------------- header + tabs
@@ -1010,7 +1020,8 @@
     }
 
     var side = '<aside class="chat-side"><div class="chat-side-head">' +
-      (me ? '<div class="muted" style="font-size:.8rem;font-weight:700">Chatting as <b style="color:var(--ink)">' + esc(player(me).name) + '</b> · <button class="btn ghost small" style="padding:0 4px" data-act="pick-me">' + icon('swap', 'sm') + 'Switch</button></div>' : '') +
+      (me ? '<div class="muted" style="font-size:.8rem;font-weight:700;display:flex;flex-wrap:wrap;align-items:center;gap:4px">Chatting as <b style="color:var(--ink)">' + esc(player(me).name) + '</b> · <button class="btn ghost small" style="padding:0 4px" data-act="pick-me">' + icon('swap', 'sm') + 'Switch</button>' +
+        '<button class="btn ghost small" style="padding:0 4px;margin-left:auto" data-act="toggle-sound" aria-pressed="' + alerts.sound + '" title="Play a sound for new messages">' + icon(alerts.sound ? 'bell' : 'bellOff', 'sm') + (alerts.sound ? 'Sound on' : 'Sound off') + '</button></div>' : '') +
       '<label class="sr-only" for="chat-filter">Find a player</label><input class="input" id="chat-filter" type="search" placeholder="Find a player…" value="' + esc(ui.chatFilter) + '" data-bind="chatFilter"></div>' +
       '<div class="chan-list" data-keep-scroll="chans">' + chanBtn('group') +
       (me ? '<div class="muted" style="font-size:.72rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase;padding:10px 8px 4px">Private chats</div>' + dms.map(chanBtn).join('') : '') + '</div></aside>';
@@ -1075,6 +1086,13 @@
         '<div class="toolbar" style="justify-content:flex-end"><button class="btn primary" type="submit"' + (canWrite() ? '' : ' disabled') + '>Save name</button></div></form>' +
         '<div class="muted" style="font-size:.88rem">' + (mode === 'live' ? 'This township is shared: everyone with the link sees the same trophies, diamonds, tasks and chats, live.'
           : mode === 'local' ? 'This copy saves to this browser only, so other players don\'t see your changes.' : 'Connecting…') + '</div>' +
+        '<div class="panel" style="display:grid;gap:10px"><b>New message alerts</b>' +
+          '<span class="muted" style="font-size:.85rem">While this page is open, new messages to you show a count in the browser tab' + (me ? '' : ' (choose who you are first)') + '.</span>' +
+          '<div class="toolbar"><button class="chip" data-act="toggle-sound" aria-pressed="' + alerts.sound + '">' + icon(alerts.sound ? 'bell' : 'bellOff', 'sm') + 'Sound ' + (alerts.sound ? 'on' : 'off') + '</button>' +
+          (popupState() === 'unsupported' ? '' : popupState() === 'blocked'
+            ? '<span class="muted" style="font-size:.85rem">Pop-ups are blocked for this site in your browser settings.</span>'
+            : '<button class="chip" data-act="toggle-popup" aria-pressed="' + (popupState() === 'on') + '">Pop-ups on this computer ' + (popupState() === 'on' ? 'on' : 'off') + '</button>') +
+          '</div></div>' +
         (mode === 'local' ? '<div class="panel" style="display:grid;gap:10px"><b>Data on this device</b>' +
           '<div class="toolbar"><button class="btn danger" data-act="reset-blank">Start fresh (clear everything)</button><button class="btn" data-act="load-demo">Load example data</button></div></div>' : '');
     } else if (m.kind === 'confirm-reset') {
@@ -1108,6 +1126,71 @@
           '<div class="toolbar" style="justify-content:flex-end"><button class="btn" type="submit">Apply correction</button></div></form>' : '');
     }
     return '<div class="modal-back" data-act="backdrop"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">' + inner + '</div></div>';
+  }
+
+  // ---------------------------------------------------------------- message alerts
+  // A chime, a line at the bottom of the page and, on computers that allow it, a
+  // pop-up from the browser when a new message reaches you. Works while the page is open.
+  var seenMsgs = null, audioCtx = null;
+  function unlockAudio() {
+    if (audioCtx) { if (audioCtx.state === 'suspended') audioCtx.resume().catch(function () {}); return; }
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    try { audioCtx = new AC(); } catch (e) { audioCtx = null; }
+  }
+  function chime() {
+    if (!alerts.sound || !audioCtx) return;
+    try {
+      var t = audioCtx.currentTime;
+      [[880, 0], [1320, 0.12]].forEach(function (n) {
+        var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+        o.type = 'sine'; o.frequency.value = n[0];
+        g.gain.setValueAtTime(0.0001, t + n[1]);
+        g.gain.exponentialRampToValueAtTime(0.18, t + n[1] + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + n[1] + 0.35);
+        o.connect(g); g.connect(audioCtx.destination);
+        o.start(t + n[1]); o.stop(t + n[1] + 0.4);
+      });
+    } catch (e) { /* sound unavailable */ }
+  }
+  function popupSupported() {
+    return 'Notification' in window && !(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  }
+  function popupState() {
+    if (!popupSupported()) return 'unsupported';
+    if (Notification.permission === 'denied') return 'blocked';
+    return alerts.popup && Notification.permission === 'granted' ? 'on' : 'off';
+  }
+  function systemNotify(title, body) {
+    if (popupState() !== 'on') return;
+    try {
+      var n = new Notification(title, { body: body, tag: 'township-chat' });
+      n.onclick = function () { window.focus(); if (location.hash !== '#chat') location.hash = 'chat'; n.close(); };
+    } catch (e) { /* this browser only allows pop-ups from installed apps */ }
+  }
+  function isMyChannel(ch) {
+    if (ch === 'group') return true;
+    return !!me && ch.indexOf('dm-') === 0 && ch.slice(3).split('-').indexOf(me) >= 0;
+  }
+  function checkNewMessages() {
+    if (mode === 'connecting' || !store) return;
+    if (!seenMsgs) { seenMsgs = {}; S.messages.forEach(function (m) { seenMsgs[m.id] = 1; }); return; }
+    var fresh = S.messages.filter(function (m) { return !seenMsgs[m.id]; });
+    fresh.forEach(function (m) { seenMsgs[m.id] = 1; });
+    if (!me) return;
+    var viewing = ui.view === 'chat' && ui.chatOpen && document.visibilityState === 'visible';
+    var incoming = fresh.filter(function (m) {
+      return m.from !== me && isMyChannel(m.ch) && !(viewing && m.ch === ui.chatCh);
+    });
+    if (!incoming.length) return;
+    var last = incoming[incoming.length - 1];
+    var who = last.from === 'system' ? S.town.name : player(last.from).name;
+    var where = last.ch === 'group' ? 'Town square' : 'private chat';
+    var text = String(last.text || '');
+    if (text.length > 70) text = text.slice(0, 67) + '…';
+    chime();
+    if (document.visibilityState === 'visible') toast(who + ' (' + where + '): ' + text, 'msg');
+    else systemNotify(who + ' · ' + (last.ch === 'group' ? 'Town square' : 'Private message'), text);
   }
 
   // ---------------------------------------------------------------- toasts + confetti
@@ -1210,6 +1293,19 @@
         break;
       }
       case 'swatch': ui.editColor = el.getAttribute('data-color'); renderAll(); break;
+      case 'toggle-sound':
+        alerts.sound = !alerts.sound; saveAlerts(); unlockAudio(); if (alerts.sound) chime();
+        renderAll(); break;
+      case 'toggle-popup':
+        if (popupState() === 'on') { alerts.popup = false; saveAlerts(); renderAll(); break; }
+        try {
+          Promise.resolve(Notification.requestPermission()).then(function (perm) {
+            alerts.popup = perm === 'granted'; saveAlerts();
+            toast(perm === 'granted' ? 'Pop-ups are on. You\'ll see one when a message arrives while this tab is in the background.' : 'Your browser didn\'t allow pop-ups for this site.');
+            renderAll();
+          }).catch(function () { toast('Your browser didn\'t allow pop-ups for this site.'); });
+        } catch (e) { toast('Your browser didn\'t allow pop-ups for this site.'); }
+        break;
       case 'reset-blank': openModal({ kind: 'confirm-reset' }); break;
       case 'confirm-reset': if (store && store.reset) { store.reset(false); me = null; lsSet(ME_KEY, ''); lastRead = {}; lsSet(READ_KEY, '{}'); } ui.modal = null; toast('Fresh start. Rename your 20 players from the Players tab.'); renderAll(); break;
       case 'load-demo': if (store && store.reset) store.reset(true); ui.modal = null; renderAll(); break;
@@ -1291,6 +1387,8 @@
     if (!root) { root = document.createElement('div'); root.id = 'app'; document.body.appendChild(root); }
     buildShell(root);
     document.addEventListener('click', onClick);
+    document.addEventListener('pointerdown', unlockAudio, { passive: true });
+    document.addEventListener('keydown', unlockAudio);
     document.addEventListener('submit', onSubmit);
     document.addEventListener('input', onInput);
     document.addEventListener('keydown', onKey);
