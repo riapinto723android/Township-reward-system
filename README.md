@@ -10,20 +10,31 @@ A co-op rewards tracker for a 20-player township: trophies, diamonds, tasks, and
 4. **Tasks**: log completed tasks by type (Regatta, helicopter, train, airplane, ship, zoo, factory, other). The page shows total tasks for each player, tasks by type, and a task log where entries can be removed.
 5. **Chat**: a group chat (Town square) for all 20 players and a private chat between any two players, with unread badges.
 
-## Running it
+## Live site
 
-It is a static site with no build step: `index.html`, `styles.css` and `app.js`.
+https://riapinto723android.github.io/Township-reward-system/
 
-- **Locally**: open `index.html` in a browser.
-- **GitHub Pages**: Settings → Pages → Deploy from branch → pick the branch and `/ (root)`.
-  The site will be served at `https://<your-username>.github.io/Township-reward-system/`.
+No sign-up, no email and no personal details are needed. Players just open the link and pick their
+player slot under **Who are you?**
 
-### Where data is saved
+### Turning on GitHub Pages (one time)
 
-- On GitHub Pages or a local file, data is saved in **that browser only** (localStorage). Tabs on the same
-  device stay in sync, but other players won't see your changes. The first visit shows example data; use **Start fresh** to clear it.
-- When published as a shared claude.ai artifact, the same code detects the shared database and everyone with access
-  sees the same trophies, tasks and chats live.
+1. Open the repository's **Settings → Pages**.
+2. Under **Build and deployment**, set **Source** to **Deploy from a branch**.
+3. Pick branch **main** and folder **/ (root)**, then **Save**.
 
-To run a shared version on your own hosting you'd need a backend (for example Firebase or Supabase). Swap
-`localStore` in `app.js` for one that uses it: it only needs `addActivity`, `removeActivity`, `setPlayer`, `setTown` and `addMessage`.
+The site goes live at the address above within a minute or two, and redeploys on every push to `main`.
+
+## Where data is saved
+
+The GitHub Pages site saves to **each browser on its own device** (localStorage). Tabs on the same device
+stay in sync, but other players don't see your tasks or messages. The first visit shows example data;
+use **Start fresh** to clear it.
+
+To share trophies, tasks and chat between players' phones without accounts or emails, the site needs a
+database service (for example Firebase with anonymous sign-in). `app.js` keeps all saving in one store
+object, so a shared store only needs `addActivity`, `removeActivity`, `setPlayer`, `setTown` and `addMessage`.
+
+## Running it locally
+
+Open `index.html` in a browser. There's no build step.
